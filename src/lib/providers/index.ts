@@ -1,16 +1,14 @@
 import type { NotificationLog, NotificationProvider, SendResult } from '../types';
 
-// ─── Email Provider (Real with Resend, simulated as fallback) ──────────────
+// ─── Email Provider ────────────────────────────────────────────────────────
 
 export class EmailProvider implements NotificationProvider {
   channel = 'email' as const;
 
   async send(log: NotificationLog): Promise<SendResult> {
-    // If RESEND_API_KEY is configured, use Resend (real email)
     if (process.env.RESEND_API_KEY) {
       return this.sendWithResend(log);
     }
-    // Otherwise simulate
     return this.simulate(log);
   }
 
@@ -23,7 +21,7 @@ export class EmailProvider implements NotificationProvider {
           Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
         },
         body: JSON.stringify({
-          from: process.env.EMAIL_FROM ?? 'notifications@yourdomain.com',
+          from: process.env.EMAIL_FROM ?? 'onboarding@resend.dev',
           to: [log.to],
           subject: log.subject ?? '(no subject)',
           text: log.body,
@@ -41,7 +39,6 @@ export class EmailProvider implements NotificationProvider {
   }
 
   private simulate(log: NotificationLog): SendResult {
-    // Simulate 10% failure rate for testing retries
     const fail = Math.random() < 0.1;
     console.log(`[EMAIL SIMULATED] to=${log.to} subject="${log.subject}" fail=${fail}`);
     if (fail) return { success: false, error: 'Simulated SMTP timeout' };
@@ -49,33 +46,48 @@ export class EmailProvider implements NotificationProvider {
   }
 }
 
-// ─── SMS Provider (Simulated — swap for Twilio) ─────────────────────────────
+// ─── SMS Provider (Twilio) ─────────────────────────────────────────────────
 
 export class SmsProvider implements NotificationProvider {
   channel = 'sms' as const;
 
   async send(log: NotificationLog): Promise<SendResult> {
-    // Swap body for real Twilio integration:
-    // const client = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
-    // const msg = await client.messages.create({ body: log.body, from: '...', to: log.to });
-    // return { success: true, messageId: msg.sid };
+    const sid   = process.env.TWILIO_SID;
+    const token = process.env.TWILIO_TOKEN;
+    const from  = process.env.TWILIO_FROM;
 
-    const fail = Math.random() < 0.1;
-    console.log(`[SMS SIMULATED] to=${log.to} body="${log.body.slice(0, 60)}" fail=${fail}`);
-    if (fail) return { success: false, error: 'Simulated SMS gateway error' };
-    return { success: true, messageId: `sim_sms_${Date.now()}` };
+    if (!sid || !token || !from) {
+      console.log(`[SMS SIMULATED] to=${log.to} body="${log.body.slice(0, 60)}"`);
+      return { success: true, messageId: `sim_sms_${Date.now()}` };
+    }
+
+    try {
+      const res = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64'),
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({ To: log.to, From: from, Body: log.body }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) return { success: false, error: data.message };
+      return { success: true, messageId: data.sid };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
   }
 }
 
-// ─── Push Provider (Simulated — swap for FCM/APNs) ─────────────────────────
+// ─── Push Provider (Simulado) ──────────────────────────────────────────────
 
 export class PushProvider implements NotificationProvider {
   channel = 'push' as const;
 
   async send(log: NotificationLog): Promise<SendResult> {
-    // Swap for Firebase Admin SDK:
-    // await admin.messaging().send({ token: log.to, notification: { body: log.body } });
-
     const fail = Math.random() < 0.1;
     console.log(`[PUSH SIMULATED] token=${log.to.slice(0, 20)}... body="${log.body.slice(0, 60)}" fail=${fail}`);
     if (fail) return { success: false, error: 'Simulated FCM error' };
@@ -83,12 +95,12 @@ export class PushProvider implements NotificationProvider {
   }
 }
 
-// ─── Provider Registry ────────────────────────────────────────────────────
+// ─── Registry ─────────────────────────────────────────────────────────────
 
 const registry: Record<string, NotificationProvider> = {
   email: new EmailProvider(),
-  sms: new SmsProvider(),
-  push: new PushProvider(),
+  sms:   new SmsProvider(),
+  push:  new PushProvider(),
 };
 
 export function getProvider(channel: string): NotificationProvider {
